@@ -1,0 +1,2 @@
+# This goes at the top of the zabbix agent config file
+UserParameter=net.superhub.stats[*],python /usr/sbin/SuperHubStats.py -i $1 -c $2 -g $3 -s "$4"
