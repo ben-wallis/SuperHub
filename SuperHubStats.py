@@ -1,82 +1,171 @@
 from bs4 import BeautifulSoup
-import urllib2
+from optparse import OptionParser
+import requests
 import csv
 import datetime
 import time
+import sys
 
 # This script reads statistics from a VirginMedia SuperHub2 / 2ac
 # It will save into a .CSV file the following information
 #   * Upstream power levels
 #   * Downstream power levels
 #   * Downstream SNR
+#   * Downstream Pre-RS Errors
+#   * Downstream Post-RS Errors
 # Requires http://www.crummy.com/software/BeautifulSoup/
 
-# A timestamp
-timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+parser = OptionParser()
+
+parser.add_option("-c", "--channel",
+                  dest="channel",
+                  help="Sets the specified channel ID to return data for (must be used in conjunction with -s and -g",
+                  metavar="CHANNEL")
+
+parser.add_option("-f", "--file",
+                  dest="outputfile",
+                  default="vm.csv",
+                  help="Sets the filename to save to (default is vm.csv)",
+                  metavar="FILE")
+
+parser.add_option("-g", "--statgroup",
+                  dest="statgroup",
+                  help="Sets the stat group to return data for (either ds for downstream or us for upstream)",
+                  metavar="STATGROUP")
+
+parser.add_option("-i", "--ip",
+                  default="192.168.100.1",
+                  dest="superhubip",
+                  help="Sets the SuperHub IP Address (default is 192.168.100.1)",
+                  metavar="IPADDRESS")
+
+parser.add_option("-s", "--stat",
+                  dest="stat",
+                  help="Sets the statistic to return data for (must be used in conjunction with -c and -g)",
+                  metavar="STAT")
+
+parser.add_option("-t", "--stdout",
+                  default=False,
+                  dest="outputstdout",
+                  action="store_true",
+                  help="Outputs to stdout instead of a file")
+
+options, args = parser.parse_args()
+
+if not (options.stat is None) == (options.channel is None) == (options.statgroup is None):
+    exit("The -c, -g and -s flags must either be all set, or all not set")
+
+if not options.statgroup is None:
+    if (options.statgroup != "ds") and (options.statgroup != "us"):
+        exit("The -g option only accepts \"ds\" or \"us\" as valid options")
 
 # The default SuperHub IP address.
-SuperHubIP = "http://192.168.0.1/"
+SuperHubIP = "http://" + options.superhubip + "/"
 
-# Fetch the HTML pages
-upstream   = urllib2.urlopen(SuperHubIP + "cgi-bin/VmRouterStatusUpstreamCfgCgi")
-downstream = urllib2.urlopen(SuperHubIP + "cgi-bin/VmRouterStatusDownstreamCfgCgi")
+# Fetch the HTML pages and compress whitespace
+upstream = requests.get(SuperHubIP + "cgi-bin/VmRouterStatusUpstreamCfgCgi")
+upstream_html = "".join(line.strip() for line in upstream.text.split("\n"))
 
-# Parse them
-up_soup = BeautifulSoup(upstream.read())
-down_soup = BeautifulSoup(downstream.read())
+downstream = requests.get(SuperHubIP + "cgi-bin/VmRouterStatusDownstreamCfgCgi")
+downstream_html = "".join(line.strip() for line in downstream.text.split("\n"))
 
-# Find the Upstream power levels
-'''
-<tr>
-	<td class="title">Power Level (dBmV)</td>
-	<td>41.00</td>
-	<td>N/A</td>
-	<td>N/A</td>
-	<td>45.00</td>
-</tr>
-'''
-us_power_label = up_soup.find(text="Power Level (dBmV)")
-us_power_table = us_power_label.parent.parent
-us_power = us_power_table.findAll('td')
+up_soup = BeautifulSoup(upstream_html, "html.parser")
+down_soup = BeautifulSoup(downstream_html, "html.parser")
 
-# Currently, Virgin Media only uses US-1 and US-4. This may change in the future.
-us1_power = us_power[1].text
-us2_power = us_power[2].text
-us3_power = us_power[3].text
-us4_power = us_power[4].text
+# Remove all <input> tags from the downstream as we don't need them
+[i.extract() for i in down_soup.findAll('input')]
 
-# Find Downstream levels
-ds_power_label = down_soup.find(text="Power Level (dBmV)")
-ds_power_table = ds_power_label.parent.parent
-ds_power = ds_power_table.findAll('td')
+trs = down_soup.findAll('tr')
 
-# Currently, VM only uses 8 DS channels
-ds1_power = ds_power[1].text
-ds2_power = ds_power[2].text
-ds3_power = ds_power[3].text
-ds4_power = ds_power[4].text
-ds5_power = ds_power[5].text
-ds6_power = ds_power[6].text
-ds7_power = ds_power[7].text
-ds8_power = ds_power[8].text
 
-ds_rx_label = down_soup.find(text="RxMER (dB)")
-ds_rx_table = ds_rx_label.parent.parent
-ds_rx = ds_rx_table.findAll('td')
+def extract_channel_data(table_rows):
+    table_rows.pop(0)  # Remove the DS-1 etc row  as it's useless
+    stat_count = len(table_rows)
+    channel_count = len(table_rows[0]) - 1
+    channel_data = {}
 
-ds1_rx = ds_rx[1].text
-ds2_rx = ds_rx[2].text
-ds3_rx = ds_rx[3].text
-ds4_rx = ds_rx[4].text
-ds5_rx = ds_rx[5].text
-ds6_rx = ds_rx[6].text
-ds7_rx = ds_rx[7].text
-ds8_rx = ds_rx[8].text
+    for c in range(1, channel_count + 1 ):
+        channel_data[c] = {}
+        for r in range(1, stat_count):
+            stat_name = table_rows[r].findAll('td')[0].text
+            stat_value = table_rows[r].findAll('td')[c].text
+            channel_data[c][stat_name] = stat_value
+    return channel_data
 
-# Append the details to the end of a .CSV file
-with open('vm.csv', 'a') as csvfile:
-    csv_writer = csv.writer(csvfile)
-    csv_writer.writerow([timestamp,us1_power,us2_power,us3_power,us4_power,ds1_power,ds2_power,ds3_power,ds4_power,ds5_power,ds6_power,ds7_power,ds8_power,ds1_rx,ds2_rx,ds3_rx,ds4_rx,ds5_rx,ds6_rx,ds7_rx,ds8_rx])
+ds_channel_data = extract_channel_data(down_soup.findAll('tr'))
+us_channel_data = extract_channel_data(up_soup.findAll('tr'))
+
+current_timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+rowcontent = [
+    current_timestamp,
+    us_channel_data[1]['Power Level (dBmV)'],
+    us_channel_data[2]['Power Level (dBmV)'],
+    us_channel_data[3]['Power Level (dBmV)'],
+    us_channel_data[4]['Power Level (dBmV)'],
+    ds_channel_data[1]['Power Level (dBmV)'],
+    ds_channel_data[2]['Power Level (dBmV)'],
+    ds_channel_data[3]['Power Level (dBmV)'],
+    ds_channel_data[4]['Power Level (dBmV)'],
+    ds_channel_data[5]['Power Level (dBmV)'],
+    ds_channel_data[6]['Power Level (dBmV)'],
+    ds_channel_data[7]['Power Level (dBmV)'],
+    ds_channel_data[8]['Power Level (dBmV)'],
+    ds_channel_data[1]['RxMER (dB)'],
+    ds_channel_data[2]['RxMER (dB)'],
+    ds_channel_data[3]['RxMER (dB)'],
+    ds_channel_data[4]['RxMER (dB)'],
+    ds_channel_data[5]['RxMER (dB)'],
+    ds_channel_data[6]['RxMER (dB)'],
+    ds_channel_data[7]['RxMER (dB)'],
+    ds_channel_data[8]['RxMER (dB)'],
+    ds_channel_data[1]['Pre RS Errors'],
+    ds_channel_data[2]['Pre RS Errors'],
+    ds_channel_data[3]['Pre RS Errors'],
+    ds_channel_data[4]['Pre RS Errors'],
+    ds_channel_data[5]['Pre RS Errors'],
+    ds_channel_data[6]['Pre RS Errors'],
+    ds_channel_data[7]['Pre RS Errors'],
+    ds_channel_data[8]['Pre RS Errors'],
+    ds_channel_data[1]['Post RS Errors'],
+    ds_channel_data[2]['Post RS Errors'],
+    ds_channel_data[3]['Post RS Errors'],
+    ds_channel_data[4]['Post RS Errors'],
+    ds_channel_data[5]['Post RS Errors'],
+    ds_channel_data[6]['Post RS Errors'],
+    ds_channel_data[7]['Post RS Errors'],
+    ds_channel_data[8]['Post RS Errors']
+]
+
+
+def output_row_stdout(data):
+    csv_writer = csv.writer(sys.stdout)
+    csv_writer.writerow(data)
+
+
+def output_row_csv(data):
+    with open(options.outputfile, 'a') as csvfile:
+        csv_writer = csv.writer(csvfile)
+        csv_writer.writerow(data)
+
+
+def extract_channel_stat(channel, stat, data):
+    for d in data:
+        if data[d]["Channel ID"] == channel:
+            return data[d][stat]
+
+# If we aren't extracting a specific channel / stat then dump all the data to a csv row
+if options.stat is None:
+    # Either output the row to the specified file, or stdout if the -s flag was used
+    if options.outputstdout:
+        output_row_stdout(rowcontent)
+    else:
+        output_row_csv(rowcontent)
+# Otherwise, extract the specific stat that we need
+else:
+    if options.statgroup == "ds":
+        print(extract_channel_stat(options.channel, options.stat, ds_channel_data))
+    elif options.statgroup == "us":
+        print(extract_channel_stat(options.channel, options.stat, us_channel_data))
 
 # All done. Bye-bye!
 exit()
